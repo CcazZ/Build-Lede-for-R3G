@@ -1,0 +1,134 @@
+name: Build OpenWRT For Xiaomi Router 3G
+
+on:
+  watch:
+    types: started
+
+env:
+  REPO_URL: https://github.com/coolsnowwolf/lede
+  REPO_BRANCH: master
+  CONFIG_FILE: r3g.config
+  DIY_SH: diy.sh
+  UPLOAD_FIRMWARE: true
+  UPLOAD_COWTRANSFER: false
+  SSH_ACTION: true
+  TNAME: MI_R3G
+  #编译流程开关，设置为true则执行编译流程并上传编译好的固件
+  #设置为false则只上传配置文件
+  COMPILE: false 
+  
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    if: github.event.repository.owner.id == github.event.sender.id
+
+    steps:
+    - name: Checkout
+      uses: actions/checkout@master
+
+    - name: Initialization environment
+      env:
+        DEBIAN_FRONTEND: noninteractive
+      run: |
+        sudo apt update -y
+        sudo apt full-upgrade -y
+        sudo apt install -y ack antlr3 aria2 asciidoc autoconf automake autopoint binutils bison build-essential 
+        sudo apt  install -y bzip2 ccache cmake cpio curl device-tree-compiler fastjar flex gawk gettext gcc-multilib g++-multilib 
+        sudo apt  install -y git gperf haveged help2man intltool libc6-dev-i386 libelf-dev libglib2.0-dev libgmp3-dev libltdl-dev 
+        sudo apt  install -y libmpc-dev libmpfr-dev libncurses5-dev libncursesw5-dev libreadline-dev libssl-dev libtool lrzsz 
+        sudo apt install -y  mkisofs msmtp nano ninja-build p7zip p7zip-full patch pkgconf python2.7 python3 python3-pip libpython3-dev qemu-utils 
+        sudo apt install -y rsync scons squashfs-tools subversion swig texinfo uglifyjs upx-ucl unzip vim wget xmlto xxd zlib1g-dev
+        sudo timedatectl set-timezone "Asia/Shanghai"
+
+    - name: Clone source code
+      run: |
+        git clone --depth 1 $REPO_URL -b $REPO_BRANCH openwrt
+        cd openwrt/package/
+        #git clone --depth 1 https://github.com/siropboy/sirpdboy-package
+        #git clone --depth 1 https://github.com/kenzok8/openwrt-packages
+        #git clone --depth 1 https://github.com/liuran001/openwrt-packages
+        #git clone --depth 1 https://github.com/vernesong/OpenClash
+        #git clone --depth 1 https://github.com/jerrykuku/lua-maxminddb
+        git clone --depth 1 https://github.com/rufengsuixing/luci-app-adguardhome
+        git clone --depth 1 https://github.com/jerrykuku/luci-app-vssr
+
+    - name: Update and install feeds
+      run: |
+        cd openwrt
+        ./scripts/feeds update -a
+        ./scripts/feeds install -a
+
+    - name: Load custom configuration
+      run: |
+        cp -f $CONFIG_FILE openwrt/.config
+        cp -f $DIY_SH openwrt/diy.sh
+        cd openwrt
+        chmod +x diy.sh
+        sh diy.sh
+
+    - name: Setup tmate session
+      uses: mxschmitt/action-tmate@v3
+      if: env.SSH_ACTION == 'true'
+      with:
+        limit-access-to-actor: true
+
+    - name: Organize config file
+      run: |
+        mkdir -p config
+        cp -f openwrt/.config config/
+        
+    - name: Upload .config file
+      uses: actions/upload-artifact@master
+      with:
+        name: config
+        path: config
+
+    - name: Download package
+      if: env.COMPILE == 'true'
+      run: |
+        cd openwrt
+        make defconfig
+        make download -j8
+        find dl -size -1024c -exec ls -l {} \;
+        find dl -size -1024c -exec rm -f {} \;
+
+    - name: Compile the firmware
+      id: compile
+      if: env.COMPILE == 'true'
+      run: |
+        cd openwrt
+        echo -e "$(nproc) thread compile"
+        make -j$(nproc) || make -j1 V=s
+        echo "::set-output name=status::success"
+
+    - name: Organize files
+      id: organize
+      if: steps.compile.outputs.status == 'success' && env.UPLOAD_FIRMWARE == 'true' && !cancelled()
+      run: |
+        cd openwrt/bin/targets/*/*
+        rm -rf packages
+        rm -f version.buildinfo feeds.buildinfo sha256sums \
+        *-squashfs-rootfs0.bin *-squashfs-kernel1.bin \
+        *.manifest
+        md5sum config.buildinfo >> md5.txt
+        md5sum *-initramfs-kernel.bin >> md5.txt
+        md5sum *-squashfs-sysupgrade.bin >> md5.txt
+        echo "FIRMWARE=$PWD" >> $GITHUB_ENV
+        echo "::set-output name=status::success"
+
+    - name: Upload firmware directory
+      uses: actions/upload-artifact@master
+      if: steps.organize.outputs.status == 'success' && !cancelled()
+      with:
+        name: OpenWrt_MI-R3G
+        path: ${{ env.FIRMWARE }}
+
+    - name: Upload firmware to cowtransfer
+      if: steps.organize.outputs.status == 'success' && env.UPLOAD_COWTRANSFER == 'true' && !cancelled()
+      run: |
+        cd ${FIRMWARE}
+        zip -r OpenWrt_$TNAME.zip *
+        wget https://github.com/Mikubill/cowtransfer-uploader/releases/download/v0.4.23/cowtransfer-uploader_0.4.23_linux_amd64.tar.gz
+        tar -zxf cowtransfer-uploader_0.4.23_linux_amd64.tar.gz
+        ./cowtransfer-uploader -s -p 8 OpenWrt_$TNAME.zip
