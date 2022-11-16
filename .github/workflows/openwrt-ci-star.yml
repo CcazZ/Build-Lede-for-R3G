@@ -3,6 +3,7 @@ name: Build OpenWRT For Xiaomi Router 3G
 on:
   watch:
     types: started
+  workflow_dispatch:
 
 env:
   REPO_URL: https://github.com/coolsnowwolf/lede
